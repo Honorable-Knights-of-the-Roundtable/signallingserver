@@ -1,5 +1,5 @@
-github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251016081422-2d516f6c9052 h1:45p9sAuT2QHnUxkxJPeXNQZOGDp8N9hDG6VgbHjeo5E=
-github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251016081422-2d516f6c9052/go.mod h1:lph9Pt6MCXXOloL4VD1N07yWoGfmG/5/z0kQ8Oe32u0=
+github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251017164824-2cfb04ccad96 h1:LJqIn5JWfH67AvxveC9N+CiUq/ZwcGkIQ2VYsymZDkA=
+github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251017164824-2cfb04ccad96/go.mod h1:AevCKOUFUO2qV2jXN+2Aaq3ap2vtyGWwlWCgJd8WXJM=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHkI4W8=
@@ -12,8 +12,6 @@ github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/hraban/opus v0.0.0-20230925203106-0188a62cb302 h1:K7bmEmIesLcvCW0Ic2rCk6LtP5++nTnPmrO8mg5umlA=
-github.com/hraban/opus v0.0.0-20230925203106-0188a62cb302/go.mod h1:YQQXrWHN3JEvCtw5ImyTCcPeU/ZLo/YMA+TpB64XdrU=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
