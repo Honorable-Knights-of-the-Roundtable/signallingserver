@@ -3,7 +3,7 @@ module github.com/Honorable-Knights-of-the-Roundtable/signallingserver
 go 1.25.1
 
 require (
-	github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251016081422-2d516f6c9052
+	github.com/Honorable-Knights-of-the-Roundtable/roundtable v0.0.0-20251017164824-2cfb04ccad96
 	github.com/google/uuid v1.6.0
 	github.com/spf13/viper v1.21.0
 )
@@ -11,7 +11,6 @@ require (
 require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
-	github.com/hraban/opus v0.0.0-20230925203106-0188a62cb302 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v3 v3.0.7 // indirect

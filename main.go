@@ -11,9 +11,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Honorable-Knights-of-the-Roundtable/roundtable/pkg/signalling"
 	"github.com/Honorable-Knights-of-the-Roundtable/signallingserver/config"
-
-	"github.com/Honorable-Knights-of-the-Roundtable/roundtable/pkg/networking"
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
@@ -36,7 +35,7 @@ func handleSignalOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var signallingOffer networking.SignallingOffer
+	var signallingOffer signalling.SignallingOffer
 	if err := json.Unmarshal(requestBody, &signallingOffer); err != nil {
 		requestLogger.Error(
 			"error while decoding new session offer from JSON",
@@ -62,7 +61,7 @@ func handleSignalOffer(w http.ResponseWriter, r *http.Request) {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		fmt.Sprintf("%s/%s", signallingOffer.RemoteEndpoint, networking.SIGNAL_ENDPOINT),
+		fmt.Sprintf("%s/%s", signallingOffer.AnsweringPeerID.PublicIP, signalling.SIGNAL_ENDPOINT),
 		bytes.NewReader(requestBody),
 	)
 	if err != nil {
@@ -132,7 +131,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(
-		fmt.Sprintf("POST /%s", networking.SIGNAL_ENDPOINT),
+		fmt.Sprintf("POST /%s", signalling.SIGNAL_ENDPOINT),
 		handleSignalOffer,
 	)
 	listenAddress := fmt.Sprintf("localhost:%d", viper.GetInt("localport"))
