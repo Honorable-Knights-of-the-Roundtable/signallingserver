@@ -12,7 +12,7 @@ import (
 func LoadConfig(configFilePath string) {
 	viper.SetDefault("loglevel", "info")
 	viper.SetDefault("logfile", "")
-	viper.SetDefault("localport", 1066)
+	viper.SetDefault("localaddress", "localhost:1066")
 	viper.SetDefault("timeout", 30)
 
 	viper.SetConfigFile(configFilePath)

@@ -1,116 +1,182 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"time"
+	"sync"
 
-	"github.com/Honorable-Knights-of-the-Roundtable/roundtable/pkg/signalling"
 	"github.com/Honorable-Knights-of-the-Roundtable/signallingserver/config"
-	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/spf13/viper"
 )
 
-func handleSignalOffer(w http.ResponseWriter, r *http.Request) {
-	requestLogger := slog.Default().WithGroup("request").With(
-		"requestUUID", uuid.New().String(),
-	)
-	requestLogger.Debug("new incoming session offer")
+// WSMessage is the envelope for all signalling messages.
+// The server only inspects Type, To, and From — Data is forwarded opaquely.
+type WSMessage struct {
+	Type string          `json:"type"` // "register", "offer", "answer"
+	To   string          `json:"to,omitempty"`
+	From string          `json:"from,omitempty"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
 
-	// TODO: Likely a security risk to read the body... what if the body is very large?
-	requestBody, err := io.ReadAll(r.Body)
+var upgrader = websocket.Upgrader{
+	// Allow all origins for now — tighten this for production if needed
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type Server struct {
+	peers    map[string]*threadSafeWriter
+	rooms    map[string][]string // room name → peer UUIDs
+	peerRoom map[string]string   // peer UUID → room name (for cleanup on disconnect)
+	mu       sync.RWMutex
+}
+
+func NewServer() *Server {
+	return &Server{
+		peers:    make(map[string]*threadSafeWriter),
+		rooms:    make(map[string][]string),
+		peerRoom: make(map[string]string),
+	}
+}
+
+func (s *Server) register(id string, conn *threadSafeWriter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peers[id] = conn
+	slog.Info("peer registered", "id", id, "total_peers", len(s.peers))
+}
+
+func (s *Server) deregister(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.peers, id)
+	s.leaveRoomLocked(id)
+	slog.Info("peer deregistered", "id", id, "total_peers", len(s.peers))
+}
+
+// joinRoom adds peerID to the room and returns the UUIDs of peers already there.
+// Must be called with mu held for writing or use the public wrapper below.
+func (s *Server) joinRoom(peerID, roomName string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing := make([]string, len(s.rooms[roomName]))
+	copy(existing, s.rooms[roomName])
+
+	s.rooms[roomName] = append(s.rooms[roomName], peerID)
+	s.peerRoom[peerID] = roomName
+
+	slog.Info("peer joined room", "peer", peerID, "room", roomName, "existing_peers", len(existing))
+	return existing
+}
+
+// leaveRoomLocked removes peerID from their room. Caller must hold mu for writing.
+func (s *Server) leaveRoomLocked(peerID string) {
+	roomName, ok := s.peerRoom[peerID]
+	if !ok {
+		return
+	}
+	delete(s.peerRoom, peerID)
+	peers := s.rooms[roomName]
+	for i, id := range peers {
+		if id == peerID {
+			s.rooms[roomName] = append(peers[:i], peers[i+1:]...)
+			break
+		}
+	}
+	if len(s.rooms[roomName]) == 0 {
+		delete(s.rooms, roomName)
+	}
+	slog.Info("peer left room", "peer", peerID, "room", roomName)
+}
+
+func (s *Server) route(msg WSMessage) {
+	s.mu.RLock()
+	target, ok := s.peers[msg.To]
+	s.mu.RUnlock()
+
+	if !ok {
+		slog.Warn("target peer not connected", "to", msg.To, "from", msg.From)
+		return
+	}
+	if err := target.WriteJSON(msg); err != nil {
+		slog.Error("failed to forward message", "to", msg.To, "from", msg.From, "err", err)
+	}
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		requestLogger.Error(
-			"error while reading request body",
-			"err", err,
-			"request", r,
-		)
-		w.WriteHeader(http.StatusBadRequest)
+		slog.Error("websocket upgrade failed", "err", err)
+		return
+	}
+	defer conn.Close()
+
+	safe := &threadSafeWriter{Conn: conn}
+
+	// First message must be a register
+	var msg WSMessage
+	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "register" || msg.From == "" {
+		slog.Warn("first message was not a valid register", "err", err)
 		return
 	}
 
-	var signallingOffer signalling.SignallingOffer
-	if err := json.Unmarshal(requestBody, &signallingOffer); err != nil {
-		requestLogger.Error(
-			"error while decoding new session offer from JSON",
-			"err", err,
-			"request", r,
-			// "requestBody", requestBody,
-		)
-		w.WriteHeader(http.StatusBadRequest)
-		return
+	peerID := msg.From
+	s.register(peerID, safe)
+	defer s.deregister(peerID)
+
+	// Handle all subsequent messages
+	for {
+		if err := conn.ReadJSON(&msg); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				slog.Error("websocket read error", "peer", peerID, "err", err)
+			}
+			return
+		}
+		msg.From = peerID // stamp the sender so the recipient knows who sent it
+
+		switch msg.Type {
+		case "join":
+			var data struct {
+				Room string `json:"room"`
+			}
+			if err := json.Unmarshal(msg.Data, &data); err != nil || data.Room == "" {
+				slog.Warn("invalid join message", "peer", peerID, "err", err)
+				continue
+			}
+			existing := s.joinRoom(peerID, data.Room)
+			peersPayload, _ := json.Marshal(struct {
+				Peers []string `json:"peers"`
+			}{Peers: existing})
+			safe.WriteJSON(WSMessage{
+				Type: "room-peers",
+				Data: peersPayload,
+			})
+
+		default:
+			slog.Debug("routing message", "type", msg.Type, "from", peerID, "to", msg.To)
+			s.route(msg)
+		}
 	}
-	requestLogger.With("offerUUID", signallingOffer.OfferUUID.String())
-	requestLogger.Info("received signalling offer")
+}
 
-	// --------------------------------------------------------------------------------
-	// Forward this offer on to the specified remote endpoint (if possible)
+// threadSafeWriter wraps a websocket.Conn with a mutex since gorilla websocket
+// does not support concurrent writes.
+type threadSafeWriter struct {
+	*websocket.Conn
+	sync.Mutex
+}
 
-	ctx := context.Background()
-	ctx, cancelFunc := context.WithTimeout(ctx, viper.GetDuration("timeout")*time.Second)
-	defer cancelFunc()
-
-	// TODO: technically remoteEndpoint is user-defined data,
-	// so this should be validated before using for sprintf...?
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		fmt.Sprintf("%s/%s", signallingOffer.AnsweringPeerID.PublicIP, signalling.SIGNAL_ENDPOINT),
-		bytes.NewReader(requestBody),
-	)
-	if err != nil {
-		requestLogger.Error(
-			"error while creating new http request",
-			"err", err,
-		)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// If ctx.cancel is called, or ctx timeout is reached, this returns a non-nil error
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		requestLogger.Error(
-			"error while posting offer to remote client",
-			"err", err,
-		)
-		w.WriteHeader(http.StatusServiceUnavailable)
-		return
-	}
-	defer resp.Body.Close()
-	requestLogger.Debug("response received from answering client")
-
-	// --------------------------------------------------------------------------------
-	// Read response from answering client and forward this back to offering client
-	// TODO: Can we avoid reading the answer?
-
-	// TODO: Security of this? What if malicious answeringResponseBody is very large?
-	answeringResponseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		requestLogger.Error(
-			"error while reading answering request body",
-			"err", err,
-		)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(answeringResponseBody)
-
-	requestLogger.Info("request fulfilled")
+func (t *threadSafeWriter) WriteJSON(v any) error {
+	t.Lock()
+	defer t.Unlock()
+	return t.Conn.WriteJSON(v)
 }
 
 func main() {
-	configFilePath := flag.String("configFilePath", "config.yaml", "Set the file path to the config file.")
+	configFilePath := flag.String("configFilePath", "config.yaml", "Path to config file.")
 	flag.Parse()
 
 	config.LoadConfig(*configFilePath)
@@ -127,16 +193,14 @@ func main() {
 		defer logFilePointer.Close()
 	}
 
-	// --------------------------------------------------------------------------------
+	server := NewServer()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(
-		fmt.Sprintf("POST /%s", signalling.SIGNAL_ENDPOINT),
-		handleSignalOffer,
-	)
-	listenAddress := fmt.Sprintf("localhost:%d", viper.GetInt("localport"))
-	slog.Debug("starting signalling server listening", "listenAddress", listenAddress)
+	mux.HandleFunc("/ws", server.handleWS)
+
+	listenAddress := viper.GetString("localaddress")
+	slog.Info("starting signalling server", "address", listenAddress)
 	if err := http.ListenAndServe(listenAddress, mux); err != nil {
-		slog.Error("error during listen and serve", "err", err)
+		slog.Error("server failed", "err", err)
 	}
 }
