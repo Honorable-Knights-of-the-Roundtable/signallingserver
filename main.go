@@ -52,7 +52,8 @@ func (s *Server) deregister(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.peers, id)
-	s.leaveRoomLocked(id)
+	s.disconnectRoomLocked(id)
+
 	slog.Info("peer deregistered", "id", id, "total_peers", len(s.peers))
 }
 
@@ -72,8 +73,8 @@ func (s *Server) joinRoom(peerID, roomName string) []string {
 	return existing
 }
 
-// leaveRoomLocked removes peerID from their room. Caller must hold mu for writing.
-func (s *Server) leaveRoomLocked(peerID string) {
+// disconnectRoomLocked removes peerID from their room. Caller must hold mu for writing.
+func (s *Server) disconnectRoomLocked(peerID string) {
 	roomName, ok := s.peerRoom[peerID]
 	if !ok {
 		return
@@ -90,6 +91,13 @@ func (s *Server) leaveRoomLocked(peerID string) {
 		delete(s.rooms, roomName)
 	}
 	slog.Info("peer left room", "peer", peerID, "room", roomName)
+}
+
+// disconnectRoom removes peerID from their room, acquiring the lock itself.
+func (s *Server) disconnectRoom(peerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disconnectRoomLocked(peerID)
 }
 
 func (s *Server) route(msg WSMessage) {
@@ -154,6 +162,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				Type: "room-peers",
 				Data: peersPayload,
 			})
+
+		case "disconnect":
+			slog.Debug("disconnecting", "type", msg.Type, "from", peerID, "to", msg.To)
+			s.disconnectRoom(peerID)
 
 		default:
 			slog.Debug("routing message", "type", msg.Type, "from", peerID, "to", msg.To)
