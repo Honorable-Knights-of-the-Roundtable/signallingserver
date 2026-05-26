@@ -50,34 +50,43 @@ func (s *Server) register(id string, conn *threadSafeWriter) {
 
 func (s *Server) deregister(id string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	remaining := s.disconnectRoomLocked(id)
 	delete(s.peers, id)
-	s.disconnectRoomLocked(id)
+	s.mu.Unlock()
 
+	if remaining != nil {
+		s.broadcastRoomUpdate(remaining)
+	}
 	slog.Info("peer deregistered", "id", id, "total_peers", len(s.peers))
 }
 
-// joinRoom adds peerID to the room and returns the UUIDs of peers already there.
-// Must be called with mu held for writing or use the public wrapper below.
-func (s *Server) joinRoom(peerID, roomName string) []string {
+// joinRoom adds peerID to the room and returns the full member list (including the new peer).
+// Returns (nil, true) if the peer is already in that room.
+func (s *Server) joinRoom(peerID, roomName string) ([]string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	existing := make([]string, len(s.rooms[roomName]))
-	copy(existing, s.rooms[roomName])
+	if current, ok := s.peerRoom[peerID]; ok && current == roomName {
+		slog.Info("peer already in room, rejecting duplicate join", "peer", peerID, "room", roomName)
+		return nil, true
+	}
 
 	s.rooms[roomName] = append(s.rooms[roomName], peerID)
 	s.peerRoom[peerID] = roomName
 
-	slog.Info("peer joined room", "peer", peerID, "room", roomName, "existing_peers", len(existing))
-	return existing
+	all := make([]string, len(s.rooms[roomName]))
+	copy(all, s.rooms[roomName])
+	slog.Info("peer joined room", "peer", peerID, "room", roomName, "total_peers", len(all))
+	return all, false
 }
 
-// disconnectRoomLocked removes peerID from their room. Caller must hold mu for writing.
-func (s *Server) disconnectRoomLocked(peerID string) {
+// disconnectRoomLocked removes peerID from their room and returns the remaining members.
+// Returns nil if the peer was not in a room or the room is now empty.
+// Caller must hold mu for writing.
+func (s *Server) disconnectRoomLocked(peerID string) []string {
 	roomName, ok := s.peerRoom[peerID]
 	if !ok {
-		return
+		return nil
 	}
 	delete(s.peerRoom, peerID)
 	peers := s.rooms[roomName]
@@ -89,15 +98,45 @@ func (s *Server) disconnectRoomLocked(peerID string) {
 	}
 	if len(s.rooms[roomName]) == 0 {
 		delete(s.rooms, roomName)
+		slog.Info("peer left room (room now empty)", "peer", peerID, "room", roomName)
+		return nil
 	}
-	slog.Info("peer left room", "peer", peerID, "room", roomName)
+	remaining := make([]string, len(s.rooms[roomName]))
+	copy(remaining, s.rooms[roomName])
+	slog.Info("peer left room", "peer", peerID, "room", roomName, "remaining", len(remaining))
+	return remaining
 }
 
-// disconnectRoom removes peerID from their room, acquiring the lock itself.
+// disconnectRoom removes peerID from their room and broadcasts the updated member list.
 func (s *Server) disconnectRoom(peerID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.disconnectRoomLocked(peerID)
+	remaining := s.disconnectRoomLocked(peerID)
+	s.mu.Unlock()
+
+	if remaining != nil {
+		s.broadcastRoomUpdate(remaining)
+	}
+}
+
+// broadcastRoomUpdate sends the full member list to every peer in that list.
+func (s *Server) broadcastRoomUpdate(members []string) {
+	payload, _ := json.Marshal(struct {
+		Peers []string `json:"peers"`
+	}{Peers: members})
+	msg := WSMessage{Type: "room-update", Data: payload}
+
+	s.mu.RLock()
+	conns := make([]*threadSafeWriter, 0, len(members))
+	for _, id := range members {
+		if conn, ok := s.peers[id]; ok {
+			conns = append(conns, conn)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, conn := range conns {
+		conn.WriteJSON(msg)
+	}
 }
 
 func (s *Server) route(msg WSMessage) {
@@ -154,14 +193,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("invalid join message", "peer", peerID, "err", err)
 				continue
 			}
-			existing := s.joinRoom(peerID, data.Room)
-			peersPayload, _ := json.Marshal(struct {
-				Peers []string `json:"peers"`
-			}{Peers: existing})
-			safe.WriteJSON(WSMessage{
-				Type: "room-peers",
-				Data: peersPayload,
-			})
+			all, duplicate := s.joinRoom(peerID, data.Room)
+			if duplicate {
+				errPayload, _ := json.Marshal(struct {
+					Message string `json:"message"`
+				}{Message: "already in room " + data.Room})
+				safe.WriteJSON(WSMessage{Type: "error", Data: errPayload})
+				continue
+			}
+			s.broadcastRoomUpdate(all)
 
 		case "disconnect":
 			slog.Debug("disconnecting", "type", msg.Type, "from", peerID, "to", msg.To)
