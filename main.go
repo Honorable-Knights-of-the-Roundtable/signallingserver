@@ -5,12 +5,32 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/Honorable-Knights-of-the-Roundtable/signallingserver/config"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/viper"
 )
+
+const maxUsernameLen = 64
+
+// sanitizeName strips control characters, trims whitespace, and caps length.
+// Returns an empty string if nothing printable remains.
+func sanitizeName(name string) string {
+	var runes []rune
+	for _, r := range name {
+		if !unicode.IsControl(r) {
+			runes = append(runes, r)
+		}
+	}
+	name = strings.TrimSpace(string(runes))
+	if len([]rune(name)) > maxUsernameLen {
+		name = string([]rune(name)[:maxUsernameLen])
+	}
+	return name
+}
 
 // WSMessage is the envelope for all signalling messages.
 // The server only inspects Type, To, and From — Data is forwarded opaquely.
@@ -21,6 +41,11 @@ type WSMessage struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
+type peerInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 var upgrader = websocket.Upgrader{
 	// Allow all origins for now — tighten this for production if needed
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -28,6 +53,7 @@ var upgrader = websocket.Upgrader{
 
 type Server struct {
 	peers    map[string]*threadSafeWriter
+	names    map[string]string   // peer UUID → display name
 	rooms    map[string][]string // room name → peer UUIDs
 	peerRoom map[string]string   // peer UUID → room name (for cleanup on disconnect)
 	mu       sync.RWMutex
@@ -36,22 +62,25 @@ type Server struct {
 func NewServer() *Server {
 	return &Server{
 		peers:    make(map[string]*threadSafeWriter),
+		names:    make(map[string]string),
 		rooms:    make(map[string][]string),
 		peerRoom: make(map[string]string),
 	}
 }
 
-func (s *Server) register(id string, conn *threadSafeWriter) {
+func (s *Server) register(id, name string, conn *threadSafeWriter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.peers[id] = conn
-	slog.Info("peer registered", "id", id, "total_peers", len(s.peers))
+	s.names[id] = name
+	slog.Info("peer registered", "id", id, "name", name, "total_peers", len(s.peers))
 }
 
 func (s *Server) deregister(id string) {
 	s.mu.Lock()
 	remaining := s.disconnectRoomLocked(id)
 	delete(s.peers, id)
+	delete(s.names, id)
 	s.mu.Unlock()
 
 	if remaining != nil {
@@ -118,21 +147,27 @@ func (s *Server) disconnectRoom(peerID string) {
 	}
 }
 
-// broadcastRoomUpdate sends the full member list to every peer in that list.
-func (s *Server) broadcastRoomUpdate(members []string) {
-	payload, _ := json.Marshal(struct {
-		Peers []string `json:"peers"`
-	}{Peers: members})
-	msg := WSMessage{Type: "room-update", Data: payload}
-
+// broadcastRoomUpdate sends the full member list (with display names) to every peer in that list.
+func (s *Server) broadcastRoomUpdate(memberIDs []string) {
 	s.mu.RLock()
-	conns := make([]*threadSafeWriter, 0, len(members))
-	for _, id := range members {
+	peers := make([]peerInfo, 0, len(memberIDs))
+	conns := make([]*threadSafeWriter, 0, len(memberIDs))
+	for _, id := range memberIDs {
+		name := s.names[id]
+		if name == "" {
+			name = id
+		}
+		peers = append(peers, peerInfo{ID: id, Name: name})
 		if conn, ok := s.peers[id]; ok {
 			conns = append(conns, conn)
 		}
 	}
 	s.mu.RUnlock()
+
+	payload, _ := json.Marshal(struct {
+		Peers []peerInfo `json:"peers"`
+	}{Peers: peers})
+	msg := WSMessage{Type: "room-update", Data: payload}
 
 	for _, conn := range conns {
 		conn.WriteJSON(msg)
@@ -171,7 +206,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	peerID := msg.From
-	s.register(peerID, safe)
+	var regData struct {
+		Name string `json:"name"`
+	}
+	if msg.Data != nil {
+		json.Unmarshal(msg.Data, &regData)
+	}
+	name := sanitizeName(regData.Name)
+	if name == "" {
+		name = peerID
+	}
+
+	s.register(peerID, name, safe)
 	defer s.deregister(peerID)
 
 	// Handle all subsequent messages
@@ -202,6 +248,33 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			s.broadcastRoomUpdate(all)
+
+		case "rename":
+			var data struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(msg.Data, &data); err != nil {
+				slog.Warn("invalid rename message", "peer", peerID, "err", err)
+				continue
+			}
+			data.Name = sanitizeName(data.Name)
+			if data.Name == "" {
+				slog.Warn("rename rejected: empty name after sanitization", "peer", peerID)
+				continue
+			}
+			s.mu.Lock()
+			s.names[peerID] = data.Name
+			roomName := s.peerRoom[peerID]
+			var members []string
+			if roomName != "" {
+				members = make([]string, len(s.rooms[roomName]))
+				copy(members, s.rooms[roomName])
+			}
+			s.mu.Unlock()
+			slog.Info("peer renamed", "peer", peerID, "name", data.Name)
+			if roomName != "" {
+				s.broadcastRoomUpdate(members)
+			}
 
 		case "disconnect":
 			slog.Debug("disconnecting", "type", msg.Type, "from", peerID, "to", msg.To)
